@@ -21,7 +21,9 @@ default_config = {
         'static_mask': True,
 
         'static_centroid_distance_estimation': False,
-        'static_circle_diameter_estimation': False
+        'static_circle_diameter_estimation': False,
+
+        'static_crossing_line': False
     },
 
     'mask_config': {
@@ -74,6 +76,7 @@ default_config = {
     'circle_counting_config': {
         'velocity_thresh': 6, # For filtering centroids
         'confidence_thresh': 3, # For filtering centroids
+        'forward_dir': np.array([1, 0]),
 
         'count_mask_params': {'start_offset': 75,
                               'end_offset': 10000,
@@ -292,22 +295,43 @@ class CCVO:
             else:
                 average_vel = np.array([0, 0])
 
-            if np.linalg.norm(average_vel) > config['velocity_thresh']:
+            # Handle reversals and velocity rectification ======================
+            if self.config['enable']['static_crossing_line']:
+                forward = self.config['circle_counting_config']['forward_dir']
+                forward_dir = forward / np.linalg.norm(forward)
+
                 # Check for reversals
-                if self.thresholded_average_vel is not None:
-                    if np.dot(self.thresholded_average_vel, average_vel) < 0:
-                        self.reversed ^= 1
+                if np.linalg.norm(average_vel) > config['velocity_thresh']:
+                    if np.dot(self.thresholded_average_vel, forward_dir) < 0:
+                        if not self.reversed:
+                            self.reversed = True
+                            self.counted_ids = set()
+                    elif self.reversed:
+                        self.reversed = False
                         self.counted_ids = set()
 
                 self.thresholded_average_vel = average_vel
 
-            if np.linalg.norm(average_vel) > config['velocity_thresh'] / 2:
-                if self.reversed:
-                    self.average_vel = -abs(average_vel)
-                else:
-                    self.average_vel = abs(average_vel)
+                # Rectify average velocity
+                self.average_vel = np.multiply(average_vel, forward_dir)
             else:
-                self.average_vel = average_vel
+                # Check for reversals
+                if np.linalg.norm(average_vel) > config['velocity_thresh']:
+                    if self.thresholded_average_vel is not None:
+                        if np.dot(self.thresholded_average_vel, average_vel) < 0:
+                            self.reversed ^= 1
+                            self.counted_ids = set()
+
+                    self.thresholded_average_vel = average_vel
+
+                # Rectify average velocity
+                if np.linalg.norm(average_vel) > config['velocity_thresh'] / 2:
+                    if self.reversed:
+                        self.average_vel = -abs(average_vel)
+                    else:
+                        self.average_vel = abs(average_vel)
+                else:
+                    self.average_vel = average_vel
 
         except Exception as e:
             self.logger.error(e)
@@ -337,8 +361,16 @@ class CCVO:
 
         if self.thresholded_average_vel is not None:
             # Compute directions ===============================================
-            direction = (self.thresholded_average_vel
-                         / np.linalg.norm(self.thresholded_average_vel))
+            if self.config['enable']['static_crossing_line']:
+                forward_dir = self.config['circle_counting_config']['forward_dir']
+
+                if self.reversed:
+                    direction = -forward_dir / np.linalg.norm(forward_dir)
+                else:
+                    direction = forward_dir / np.linalg.norm(forward_dir)
+            else:
+                direction = (self.thresholded_average_vel
+                             / np.linalg.norm(self.thresholded_average_vel))
 
             # Compute end points for count mask
             dir_x, dir_y = (np.array([self.img_width/2, self.img_height/2])
@@ -363,7 +395,7 @@ class CCVO:
                 self.visualisation_images['count_mask'] = count_mask
 
                 self._draw_crossing_line(
-                    self.thresholded_average_vel, dir_x, dir_y
+                    direction, dir_x, dir_y
                 )
 
         # Count centroids ======================================================
@@ -516,8 +548,8 @@ class CCVO:
             self.subcount = subcount
 
     # DRAWING ==================================================================
-    def _draw_crossing_line(self, average_vel, dir_x, dir_y):
-        normal_vel = np.array([average_vel[1], -average_vel[0]])
+    def _draw_crossing_line(self, direction, dir_x, dir_y):
+        normal_vel = np.array([direction[1], -direction[0]])
         crossing_line = mos.utils.LinearLine.from_vector(
             (self.img_width/2, self.img_height/2), normal_vel
         )
