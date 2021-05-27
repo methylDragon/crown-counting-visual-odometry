@@ -11,7 +11,11 @@ cap.set(38, 1) # Set capture buffer size to 0
 FPS = 60
 M_CROWN_DISTANCE = 0.03
 
-tracker = ccvo.CCVO({'static_centroid_distance_estimation': True})
+tracker = ccvo.CCVO({
+    'static_centroid_distance_estimation': True,
+    'centroid_distance_estimation_config': {'static_distance': 150}
+})
+
 last_time = time.perf_counter()
 
 while True:

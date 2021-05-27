@@ -61,7 +61,7 @@ default_config = {
     },
 
     'circle_tracking_config': {
-        'velocity_thresh': 4, # For updating direction
+        'velocity_thresh': 6, # For updating direction
         'confidence_thresh': 3, # For filtering centroids
         'size_estimator_window': 10, # To estimate size
         'static_diameter': 150,
@@ -72,12 +72,12 @@ default_config = {
     },
 
     'circle_counting_config': {
-        'velocity_thresh': 2, # For filtering centroids
+        'velocity_thresh': 6, # For filtering centroids
         'confidence_thresh': 3, # For filtering centroids
 
-        'count_mask_params': {'start_offset': 100,
+        'count_mask_params': {'start_offset': 75,
                               'end_offset': 10000,
-                              'thickness': 300}
+                              'thickness': 150}
     },
 
     'centroid_distance_estimation_config': {
@@ -108,16 +108,19 @@ class CCVO:
         # Centroid pixel distance estimators
         estimator_config = self.config['centroid_distance_estimation_config']
         self.counted_centroid_distances = deque(
-            [1], maxlen=estimator_config['distance_estimator_window']
+            [estimator_config['static_distance']],
+            maxlen=estimator_config['distance_estimator_window']
         )
-        self.counted_centroid_distance = 1
+        self.counted_centroid_distance = estimator_config['static_distance']
+        self.estimated_centroid_distance = estimator_config['static_distance']
 
         # Circle pixel radius estimators
         tracking_config = self.config['circle_tracking_config']
         self.circle_diameters = deque(
-            [1], maxlen=tracking_config['size_estimator_window']
+            [tracking_config['static_diameter']],
+            maxlen=tracking_config['size_estimator_window']
         )
-        self.circle_diameter = 1
+        self.estimated_circle_diameter = tracking_config['static_diameter']
 
         # Count Statistics
         self.counted_ids = set()
@@ -140,8 +143,8 @@ class CCVO:
             'subcount': self.subcount,
             'reversed': self.reversed,
             'average_pixel_vel': self.average_vel,
-            'estimated_circle_diameter': self.circle_diameter,
-            'estimated_centroid_distance': np.mean(self.counted_centroid_distances)
+            'estimated_circle_diameter': self.estimated_circle_diameter,
+            'estimated_centroid_distance': self.estimated_centroid_distance
         }
 
     def get_visualisations(self):
@@ -275,13 +278,7 @@ class CCVO:
                 if conf > config['confidence_thresh']
             ]
 
-            for rect in filtered_rects:
-                self.circle_diameters.append(abs(rect[0] - rect[1]))
-
-            if self.config['enable']['static_circle_diameter_estimation']:
-                self.circle_diameter = config['static_diameter']
-            else:
-                self.circle_diameter = np.mean(self.circle_diameters)
+            self._estimate_circle_diameter(filtered_rects)
 
             # Compute velocities
             filtered_vels = [
@@ -295,8 +292,6 @@ class CCVO:
             else:
                 average_vel = np.array([0, 0])
 
-            self.average_vel = average_vel
-
             if np.linalg.norm(average_vel) > config['velocity_thresh']:
                 # Check for reversals
                 if self.thresholded_average_vel is not None:
@@ -305,6 +300,14 @@ class CCVO:
                         self.counted_ids = set()
 
                 self.thresholded_average_vel = average_vel
+
+            if np.linalg.norm(average_vel) > config['velocity_thresh'] / 2:
+                if self.reversed:
+                    self.average_vel = -abs(average_vel)
+                else:
+                    self.average_vel = abs(average_vel)
+            else:
+                self.average_vel = average_vel
 
         except Exception as e:
             self.logger.error(e)
@@ -391,13 +394,14 @@ class CCVO:
             try:
                 # Count a centroid if it is:
                 # - Moving in the same direction as average,
-                # - Is moving fast enough
                 # - Is in the count mask
+                # - Is moving fast enough
                 if (np.dot(smoothed_vels[centroid_id],
                            self.thresholded_average_vel) > 0
                         and count_mask[count_y, count_x] > 0
                         and np.linalg.norm(vels[centroid_id])
                             > config['velocity_thresh']):
+
                     self.counted_ids.add(centroid_id)
 
                     if self.reversed:
@@ -407,14 +411,7 @@ class CCVO:
 
                     # Append
                     self.last_counted_id = centroid_id
-
-                    if self.thresholded_average_vel is not None:
-                        self._compute_last_count_distances(direction)
-
-                    self.counted_centroid_distances.append(
-                        self.counted_centroid_distance
-                    )
-                    self.counted_centroid_distance = 0
+                    self._estimate_centroid_distance(direction)
 
             except Exception as e:
                 pass
@@ -451,6 +448,35 @@ class CCVO:
                          color=(0, 255 * (self.reversed ^ 1), 255 * self.reversed),
                          thickness=2)
 
+    # ESTIMATORS AND COMPUTATIONS ==============================================
+    def _estimate_circle_diameter(self, rects):
+        config = self.config['circle_detection_config']
+
+        for rect in rects:
+            self.circle_diameters.append(abs(rect[0] - rect[1]))
+
+        if self.config['enable']['static_circle_diameter_estimation']:
+            self.estimated_circle_diameter = config['static_diameter']
+        else:
+            self.estimated_circle_diameter = np.mean(self.circle_diameters)
+
+    def _estimate_centroid_distance(self, direction):
+        config = self.config['centroid_distance_estimation_config']
+
+        if self.thresholded_average_vel is not None:
+            self._compute_last_count_distances(direction)
+
+        self.counted_centroid_distances.append(self.counted_centroid_distance)
+        self.counted_centroid_distance = 0
+
+        if self.config['enable']['static_centroid_distance_estimation']:
+            self.estimated_centroid_distance = config['static_distance']
+        else:
+            self.estimated_centroid_distance = np.mean(
+                self.counted_centroid_distances
+            )
+
+
     def _compute_last_count_distances(self, direction):
         centroids = self.centroid_statistics['centroids']
 
@@ -474,23 +500,15 @@ class CCVO:
     def _compute_subcount(self):
         centroids = self.centroid_statistics['centroids']
 
+        # Only update subcount if we can actually see the last centroid
         if self.last_counted_id not in centroids:
             return
 
-        if self.config['enable']['static_centroid_distance_estimation']:
-            config = self.config['centroid_distance_estimation_config']
-            subcount = mos.utils.clamp(
-                self.last_counted_vect / config['static_distance'],
-                smallest = -1,
-                largest = 1
-            )
-        else:
-            subcount = mos.utils.clamp(
-                (self.last_counted_vect
-                 / np.mean(self.counted_centroid_distances)),
-                smallest = -1,
-                largest = 1
-            )
+        subcount = mos.utils.clamp(
+            self.last_counted_vect / self.estimated_centroid_distance,
+            smallest = -1,
+            largest = 1
+        )
 
         if self.reversed:
             self.subcount = -subcount
