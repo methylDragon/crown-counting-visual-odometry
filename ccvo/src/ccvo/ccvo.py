@@ -211,7 +211,7 @@ class CCVO:
             np.array([
                 [left, top],
                 [self.img_width - right, top],
-                [self.img_width, self.img_height - bottom],
+                [self.img_width - right, self.img_height - bottom],
                 [left, self.img_height - bottom]
             ]),
             (255, 255, 255)
